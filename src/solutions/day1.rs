@@ -219,33 +219,40 @@ fn solve(input: &str) -> Result<State> {
     Ok(state)
 }
 
+fn split(input: &str) -> (&str, &str) {
+    let mut cut = input.len() / 2;
+
+    while !input.is_char_boundary(cut) { cut += 1 }
+    for c in input[cut..].chars() {
+        if c == 'L' || c == 'R' { break; }
+        cut += c.len_utf8();
+    }
+
+    input.split_at(cut)
+}
+
 fn solve_par(input: &str) -> Result<Position> {
-    // I don't want to think about small cases for now.
-    if input.len() < 100 {
-        return Err("You input is too small! Dont use solve_par".into())
-    }
+    let mut cluster = [""; 32];
 
-    let count = input.len() / 8;
-    let mut clusters  = vec![""; 8];
+    fn recurse_assign<'a>(cluster: &mut [&'a str], left: &'a str, right: &'a str) {
+        if cluster.len() == 2 {
+            cluster[0] = left;
+            cluster[1] = right;
+        } else {
+            let n = cluster.len() / 2;
+            let (lcluster, rcluster) = cluster.split_at_mut(n);
+            let (lleft, rleft)   = split(left);
+            let (lright, rright) = split(right);
 
-    let mut start = 0;
-    for k in 0..7 {
-        // check to see if the current character is an R or L.
-        // This is where the next command will start.
-        let mut end = start + count;
-        while !input.is_char_boundary(end) { end += 1 }
-        for c in input[end..].chars() {
-            if c == 'L' || c == 'R' { break; }
-            end += c.len_utf8();
+            recurse_assign(lcluster, lleft, rleft);
+            recurse_assign(rcluster, lright, rright);
         }
-
-        clusters[k] = &input[start..end];
-        start = end;
     }
 
-    clusters[7] = &input[start..];
+    let (left, right) = split(input);
+    recurse_assign(&mut cluster, left, right);
 
-    let end = clusters.into_par_iter()
+    let end = cluster.into_par_iter()
         .map(|p| solve(p).unwrap())
         .reduce(|| State::default(), |a, b| a + b);
 
