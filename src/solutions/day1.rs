@@ -6,8 +6,10 @@ use std::ops::Add;
 use std::error::Error;
 use std::result;
 use std::fmt;
+use std::cmp::{max, min};
 use std::collections::HashSet;
 use rayon::prelude::*;
+// use itertools::Itertools;
 
 type Result<T> = result::Result<T, String>;
 
@@ -159,7 +161,7 @@ impl Add for State {
 }
 
 pub fn run() {
-    let data = match import_data("data/day1.txt") {
+    let data = match import_data("data/day1_2.txt") {
             Ok(d)    => d,
             Err(err) => {
                 println!("Error: {}", err);
@@ -167,14 +169,14 @@ pub fn run() {
             }
         };
 
-    match solve(&data) {
+    match solve1_seq(&data) {
         Ok(s) =>
             println!("The map ends at {}, which {} units away.",
                 s.position, s.position.dist()),
         Err(err) => println!("Error: {}", err),
     };
 
-    match solve_hashmap(&data) {
+    match solve2_hash(&data) {
         Ok(s) =>
             println!("Our first point of intersection is at {}, \
                       which is {} units away",
@@ -182,12 +184,14 @@ pub fn run() {
         Err(err) => println!("Error: {}", err),
     }
 
-    match solve_par(&data) {
+    match solve1_par(&data) {
         Ok(pos) =>
             println!("Par solution ends at {}, which is {} units away",
                      pos, pos.dist()),
         Err(err) => println!("Error: {}", err),
     }
+
+    println!("Lin solutions finds intersecion at {}", solve2_lin(&data));
 }
 
 fn import_data(f: &str) -> Result<String> {
@@ -204,7 +208,7 @@ fn import_data(f: &str) -> Result<String> {
     Ok(data)
 }
 
-fn solve(input: &str) -> Result<State> {
+fn solve1_seq(input: &str) -> Result<State> {
     if input.is_empty() {
         return Ok(State::default())
     }
@@ -231,10 +235,10 @@ fn split(input: &str) -> (&str, &str) {
     input.split_at(cut)
 }
 
-fn solve_par(input: &str) -> Result<Position> {
+fn solve1_par(input: &str) -> Result<Position> {
     let mut cluster = [""; 32];
 
-    fn recurse_assign<'a>(cluster: &mut [&'a str], left: &'a str, right: &'a str) {
+    fn resurse_split<'a>(cluster: &mut [&'a str], left: &'a str, right: &'a str) {
         if cluster.len() == 2 {
             cluster[0] = left;
             cluster[1] = right;
@@ -244,25 +248,29 @@ fn solve_par(input: &str) -> Result<Position> {
             let (lleft, rleft)   = split(left);
             let (lright, rright) = split(right);
 
-            recurse_assign(lcluster, lleft, rleft);
-            recurse_assign(rcluster, lright, rright);
+            resurse_split(lcluster, lleft, rleft);
+            resurse_split(rcluster, lright, rright);
         }
     }
 
     let (left, right) = split(input);
-    recurse_assign(&mut cluster, left, right);
+    resurse_split(&mut cluster, left, right);
 
     let result = cluster.into_par_iter()
-        .map(|p| solve(p).unwrap())
+        .map(|p| solve1_seq(p).unwrap())
         .reduce(|| State::default(), |a, b| a + b);
 
     Ok(result.position)
 }
 
-fn solve_hashmap(input: &str) -> Result<Position> {
+use fnv::FnvHashSet;
+
+fn solve2_hash(input: &str) -> Result<Position> {
     let cmds = input.split(',');
     let mut state  = State::default();
-    let mut crumbs: HashSet<Position> = HashSet::new();
+
+    let n = input.len()/4;
+    let mut crumbs: FnvHashSet<Position> = FnvHashSet::with_capacity_and_hasher(n, Default::default());
     crumbs.insert(Position(0,0));
 
     for cmd in cmds {
@@ -291,9 +299,85 @@ fn solve_hashmap(input: &str) -> Result<Position> {
     Ok(state.position)
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Line(Position, Position);
+
+trait Intersects {
+    fn intersects(&self) -> Option<Position>;
+}
+
+impl Intersects for (Line, Line) {
+    // Assumption: The two lines are perpendicular.
+    // NB: We don't check for intersection of the first point of the second line.
+    fn intersects(&self) -> Option<Position> {
+        //         .
+        //         |
+        // .-------|----.
+        //         .
+
+        // we want to assume the first line is horizontal
+        let canonical = ((self.0).0).0 == ((self.0).1).0;
+        let vert = if canonical { self.0 } else { self.1 };
+        let horz = if canonical { self.1 } else { self.0 };
+
+        // horz y is between vert ys
+        let c1 = ((horz.0).1 <= max((vert.0).1, (vert.1).1))
+            && ((horz.0).1 >= min((vert.0).1, (vert.1).1));
+
+        // vert x is between horz xs
+        let c2 = ((vert.0).0 <= max((horz.0).0, (horz.1).0))
+            && ((vert.0).0 >= min((horz.0).0, (horz.1).0));
+
+        // println!("horz: {:?},  vert: {:?}", horz, vert);
+        // println!("{:?}, {:?}", c1, c2);
+
+        // we determined a point of intersection, then the
+        // intersection can be determined by the y value
+        // of the horizontal line, and x value of the vert
+        if c1 && c2 {
+            Some(Position((vert.0).0, (horz.0).1))
+        } else { None }
+    }
+}
+
+fn solve2_lin(input: &str) -> Position {
+    let cmds = input.split(',');
+    let mut state = State::default();
+
+    let mut history: Vec<Position> = Vec::with_capacity(input.len()/4);
+
+    for cmd in cmds {
+        let current = state;
+        state.process_cmd(cmd);
+
+        let orient = match current.compass {
+                Compass::North | Compass::South => 1,
+                Compass::East  | Compass::West  => 0,
+            };
+
+        let mut prev = Position(0,0);
+        let line = Line(current.position, state.position);
+
+        for (idx, &hist) in history.iter().enumerate() {
+            if idx % 2 != orient { prev = hist; continue; }
+            let connect = Line(prev, hist);
+            if let Some(p) = (connect, line).intersects() {
+                if p == line.0 { continue }
+                return p
+            }
+            prev = hist;
+        }
+
+        history.push(state.position);
+    }
+
+    // If nothing is found, return the last position
+    state.position
+}
+
 #[cfg(test)]
 mod test {
-    use super::{ State, Compass, Position, solve_par, solve, import_data };
+    use super::{ State, Compass, Position, solve1_par, solve1_seq, import_data, Line, Intersects, solve2_hash, solve2_lin };
     use test::Bencher;
 
     #[test]
@@ -323,17 +407,40 @@ mod test {
 
         println!("");
         println!("Current Solution:");
-        println!("r + r: {:?}", solve("R1, R1").unwrap());
-        println!("l + l: {:?}", solve("L1, L1").unwrap());
-        println!("r + l: {:?}", solve("R1, L1").unwrap());
-        println!("l + r: {:?}", solve("L1, R1").unwrap());
+        println!("r + r: {:?}", solve1_seq("R1, R1").unwrap());
+        println!("l + l: {:?}", solve1_seq("L1, L1").unwrap());
+        println!("r + l: {:?}", solve1_seq("R1, L1").unwrap());
+        println!("l + r: {:?}", solve1_seq("L1, R1").unwrap());
+    }
+
+    #[test]
+    fn line_intersects() {
+        macro_rules! p { ($x:expr, $y:expr) => (Position($x, $y)) }
+
+        let l1 = Line(p!(-1,0), p!(1,0));
+        let l2 = Line(p!(0,-1), p!(0,1));
+
+        assert_eq!((l1,l2).intersects(), Some(Position(0,0)));
+        assert_eq!((l2,l1).intersects(), Some(Position(0,0)));
+
+        let l1 = Line(p!(1,0), p!(-1,0));
+        let l2 = Line(p!(0,1), p!(0,-1));
+
+        assert_eq!((l1,l2).intersects(), Some(Position(0,0)));
+        assert_eq!((l2,l1).intersects(), Some(Position(0,0)));
+
+        let l1 = Line(p!(-2, -16), p!(-2, -17));
+        let l2 = Line(p!(-16, -17), p!(-14, -17));
+
+        assert_eq!((l1,l2).intersects(), None);
+        assert_eq!((l2,l1).intersects(), None);
     }
 
     #[bench]
     fn bench_seq_large(b: &mut Bencher) {
         let data = import_data("data/day1_2.txt").unwrap();
         b.iter(|| {
-            let _ = solve(&data);
+            let _ = solve1_seq(&data);
         })
     }
 
@@ -341,23 +448,39 @@ mod test {
     fn bench_par_large(b: &mut Bencher) {
         let data = import_data("data/day1_2.txt").unwrap();
         b.iter(|| {
-            let _ = solve_par(&data);
+            let _ = solve1_par(&data);
         })
     }
 
     #[bench]
     fn bench_seq_small(b: &mut Bencher) {
-        let data = import_data("data/day1.txt").unwrap();
+        let data = import_data("data/day1_2.txt").unwrap();
         b.iter(|| {
-            let _ = solve(&data);
+            let _ = solve1_seq(&data);
         })
     }
 
     #[bench]
     fn bench_par_small(b: &mut Bencher) {
+        let data = import_data("data/day1_2.txt").unwrap();
+        b.iter(|| {
+            let _ = solve1_par(&data);
+        })
+    }
+
+    #[bench]
+    fn bench_intersection_hash(b: &mut Bencher) {
         let data = import_data("data/day1.txt").unwrap();
         b.iter(|| {
-            let _ = solve_par(&data);
+            let _ = solve2_hash(&data);
+        })
+    }
+
+    #[bench]
+    fn bench_intersection_lin(b: &mut Bencher) {
+        let data = import_data("data/day1.txt").unwrap();
+        b.iter(|| {
+            let _ = solve2_lin(&data);
         })
     }
 }
