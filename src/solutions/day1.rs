@@ -252,11 +252,11 @@ fn solve_par(input: &str) -> Result<Position> {
     let (left, right) = split(input);
     recurse_assign(&mut cluster, left, right);
 
-    let end = cluster.into_par_iter()
+    let result = cluster.into_par_iter()
         .map(|p| solve(p).unwrap())
         .reduce(|| State::default(), |a, b| a + b);
 
-    Ok(end.position)
+    Ok(result.position)
 }
 
 fn solve_hashmap(input: &str) -> Result<Position> {
@@ -271,10 +271,10 @@ fn solve_hashmap(input: &str) -> Result<Position> {
 
         // insert breadcrumbs into hashset.
         let delta = match state.compass {
-                Compass::North => Position(0, 1),
+                Compass::North => Position( 0, 1),
                 Compass::West  => Position(-1, 0),
-                Compass::South => Position(0, -1),
-                Compass::East  => Position(1, 0),
+                Compass::South => Position( 0,-1),
+                Compass::East  => Position( 1, 0),
             };
 
         let dist = (current - state.position).dist().abs() as u32;
