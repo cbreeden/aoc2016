@@ -2,14 +2,16 @@ use std::fs::File;
 use std::io::Read;
 use std::ops::AddAssign;
 use std::ops::Sub;
+use std::ops::Add;
 use std::error::Error;
 use std::result;
 use std::fmt;
 use std::collections::HashSet;
+use rayon::prelude::*;
 
 type Result<T> = result::Result<T, String>;
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Compass {
     North,
     West,
@@ -35,18 +37,51 @@ impl Compass {
             Compass::West  => Compass::North,
         }
     }
+
+    fn as_u8(self) -> u8 {
+        match self {
+            Compass::North => 0,
+            Compass::West  => 1,
+            Compass::South => 2,
+            Compass::East  => 3,
+        }
+    }
+
+    fn from_u8(n: u8) -> Compass {
+        match n {
+            0 => Compass::North,
+            1 => Compass::West,
+            2 => Compass::South,
+            3 => Compass::East,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Add for Compass {
+    type Output = Compass;
+    fn add(self, rhs: Compass) -> Compass {
+        Compass::from_u8( (self.as_u8() + rhs.as_u8()) % 4 )
+    }
 }
 
 impl Default for Compass {
     fn default() -> Compass { Compass::North }
 }
 
-#[derive(Default, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Default, Copy, Clone, PartialEq, Eq, Hash, Debug)]
 struct Position(i32, i32);
 
 impl AddAssign for Position {
     fn add_assign(&mut self, other: Position) {
         *self = Position(self.0 + other.0, self.1 + other.1);
+    }
+}
+
+impl Add for Position {
+    type Output = Position;
+    fn add(self, rhs: Position) -> Self::Output {
+        Position(self.0 + rhs.0, self.1 + rhs.1)
     }
 }
 
@@ -69,7 +104,7 @@ impl fmt::Display for Position {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 struct State {
     compass: Compass,
     position: Position,
@@ -77,15 +112,13 @@ struct State {
 
 impl State {
     fn process_cmd(&mut self, cmd: &str) -> Result<()> {
-        let mut chars = cmd.chars();
-        let cmd = if chars.next() == Some(' ') { chars.as_str() } else { cmd };
+        let mut chars = cmd.trim_left().chars();
 
-        let mut chars = cmd.chars();
         self.compass = match chars.next() {
                 Some('L') => self.compass.turn_left(),
                 Some('R') => self.compass.turn_right(),
                 Some(c) => return Err(format!("invalid turn `{}`", c)),
-                None    => return Err("unexpected end of command".into()),
+                None    => return Ok(()),
             };
 
         let dist = match chars.as_str().parse::<i32>() {
@@ -94,18 +127,39 @@ impl State {
             };
 
         self.position += match self.compass {
-                Compass::North => Position(dist, 0),
-                Compass::West  => Position(0, -dist),
-                Compass::South => Position(-dist, 0),
-                Compass::East  => Position(0, dist),
+                Compass::North => Position(0, dist),
+                Compass::West  => Position(-dist, 0),
+                Compass::South => Position(0, -dist),
+                Compass::East  => Position(dist, 0),
             };
 
         Ok(())
     }
 }
 
+impl Add for State {
+    type Output = State;
+    fn add(self, rhs: State) -> State {
+        macro_rules! state {
+            ($s:ident, $r:ident, $pos:expr) => ({
+                State {
+                    compass: $s.compass + $r.compass,
+                    position: $s.position + $pos,
+                }
+            })
+        }
+
+        match self.compass {
+            Compass::North => state!(self, rhs, rhs.position),
+            Compass::West =>  state!(self, rhs, Position(-rhs.position.1,  rhs.position.0)),  //(x,y) -> (-y, x)
+            Compass::South => state!(self, rhs, Position(-rhs.position.0, -rhs.position.1)), //(x,y) -> (-x, -y)
+            Compass::East =>  state!(self, rhs, Position( rhs.position.1, -rhs.position.0)),  //(x,y) -> (y, -x)
+        }
+    }
+}
+
 pub fn run() {
-    let data = match import_data() {
+    let data = match import_data("data/day1.txt") {
             Ok(d)    => d,
             Err(err) => {
                 println!("Error: {}", err);
@@ -114,21 +168,30 @@ pub fn run() {
         };
 
     match solve(&data) {
-        Ok(pos) =>
-            println!("The map ends at {}, which {} units away.", pos, pos.dist()),
+        Ok(s) =>
+            println!("The map ends at {}, which {} units away.",
+                s.position, s.position.dist()),
         Err(err) => println!("Error: {}", err),
     };
 
     match solve_hashmap(&data) {
-        Ok(pos) =>
+        Ok(s) =>
             println!("Our first point of intersection is at {}, \
-                      which is {} units away", pos, pos.dist()),
+                      which is {} units away",
+                      s, s.dist()),
+        Err(err) => println!("Error: {}", err),
+    }
+
+    match solve_par(&data) {
+        Ok(pos) =>
+            println!("Par solution ends at {}, which is {} units away",
+                     pos, pos.dist()),
         Err(err) => println!("Error: {}", err),
     }
 }
 
-fn import_data() -> Result<String> {
-    let mut file = match File::open("data/day1.txt") {
+fn import_data(f: &str) -> Result<String> {
+    let mut file = match File::open(f) {
             Err(err) => return Err(err.description().into()),
             Ok(n) => n,
         };
@@ -141,7 +204,11 @@ fn import_data() -> Result<String> {
     Ok(data)
 }
 
-fn solve(input: &str) -> Result<Position> {
+fn solve(input: &str) -> Result<State> {
+    if input.is_empty() {
+        return Ok(State::default())
+    }
+
     let cmds = input.split(',');
     let mut state = State::default();
 
@@ -149,7 +216,40 @@ fn solve(input: &str) -> Result<Position> {
         state.process_cmd(cmd)?;
     }
 
-    Ok(state.position)
+    Ok(state)
+}
+
+fn solve_par(input: &str) -> Result<Position> {
+    // I don't want to think about small cases for now.
+    if input.len() < 100 {
+        return Err("You input is too small! Dont use solve_par".into())
+    }
+
+    let count = input.len() / 8;
+    let mut clusters  = vec![""; 8];
+
+    let mut start = 0;
+    for k in 0..7 {
+        // check to see if the current character is an R or L.
+        // This is where the next command will start.
+        let mut end = start + count;
+        while !input.is_char_boundary(end) { end += 1 }
+        for c in input[end..].chars() {
+            if c == 'L' || c == 'R' { break; }
+            end += c.len_utf8();
+        }
+
+        clusters[k] = &input[start..end];
+        start = end;
+    }
+
+    clusters[7] = &input[start..];
+
+    let end = clusters.into_par_iter()
+        .map(|p| solve(p).unwrap())
+        .reduce(|| State::default(), |a, b| a + b);
+
+    Ok(end.position)
 }
 
 fn solve_hashmap(input: &str) -> Result<Position> {
@@ -164,10 +264,10 @@ fn solve_hashmap(input: &str) -> Result<Position> {
 
         // insert breadcrumbs into hashset.
         let delta = match state.compass {
-                Compass::North => Position(1, 0),
-                Compass::West  => Position(0, -1),
-                Compass::South => Position(-1, 0),
-                Compass::East  => Position(0, 1),
+                Compass::North => Position(0, 1),
+                Compass::West  => Position(-1, 0),
+                Compass::South => Position(0, -1),
+                Compass::East  => Position(1, 0),
             };
 
         let dist = (current - state.position).dist().abs() as u32;
@@ -186,13 +286,71 @@ fn solve_hashmap(input: &str) -> Result<Position> {
 
 #[cfg(test)]
 mod test {
-    use super::solve;
+    use super::{ State, Compass, Position, solve_par, solve, import_data };
+    use test::Bencher;
 
     #[test]
-    fn examples() {
-        // The two will be interleaved.
-        assert_eq!(solve("R2, L3").unwrap(), 5);
-        assert_eq!(solve("R2, R2, R2").unwrap(), 2);
-        assert_eq!(solve("R5, L5, R5, R3").unwrap(), 12);
+    fn state_add() {
+        let r = State {
+            compass: Compass::East,
+            position: Position(1, 0),
+        };
+
+        let l = State {
+            compass: Compass::West,
+            position: Position(-1, 0),
+        };
+
+        // Assert that binary addition works on L/R:
+        assert_eq!(r + r, State { compass: Compass::South, position: Position(1, -1) });
+        assert_eq!(r + l, State { compass: Compass::North, position: Position(1, 1) });
+        assert_eq!(l + r, State { compass: Compass::North, position: Position(-1, 1) });
+        assert_eq!(l + l, State { compass: Compass::South, position: Position(-1, -1) });
+
+        println!("");
+        println!("Addition trait:");
+        println!("r + r: {:?}", r + r);
+        println!("l + l: {:?}", l + l);
+        println!("r + l: {:?}", r + l);
+        println!("l + r: {:?}", l + r);
+
+        println!("");
+        println!("Current Solution:");
+        println!("r + r: {:?}", solve("R1, R1").unwrap());
+        println!("l + l: {:?}", solve("L1, L1").unwrap());
+        println!("r + l: {:?}", solve("R1, L1").unwrap());
+        println!("l + r: {:?}", solve("L1, R1").unwrap());
+    }
+
+    #[bench]
+    fn bench_seq_large(b: &mut Bencher) {
+        let data = import_data("data/day1_2.txt").unwrap();
+        b.iter(|| {
+            let _ = solve(&data);
+        })
+    }
+
+    #[bench]
+    fn bench_par_large(b: &mut Bencher) {
+        let data = import_data("data/day1_2.txt").unwrap();
+        b.iter(|| {
+            let _ = solve_par(&data);
+        })
+    }
+
+    #[bench]
+    fn bench_seq_small(b: &mut Bencher) {
+        let data = import_data("data/day1.txt").unwrap();
+        b.iter(|| {
+            let _ = solve(&data);
+        })
+    }
+
+    #[bench]
+    fn bench_par_small(b: &mut Bencher) {
+        let data = import_data("data/day1.txt").unwrap();
+        b.iter(|| {
+            let _ = solve_par(&data);
+        })
     }
 }
